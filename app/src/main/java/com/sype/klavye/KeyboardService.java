@@ -38,6 +38,34 @@ public class KeyboardService extends InputMethodService {
   TextView status;
   final Handler h = new Handler(Looper.getMainLooper());
   Runnable repeat;
+  PopupWindow pop;
+  TextView popTv;
+
+  void showPop(View v, String label) {
+    if (pop == null) {
+      popTv = new TextView(this);
+      popTv.setGravity(Gravity.CENTER);
+      popTv.setTextSize(30);
+      pop = new PopupWindow(popTv);
+      pop.setClippingEnabled(false);
+      pop.setTouchable(false);
+    }
+    GradientDrawable d = new GradientDrawable();
+    d.setCornerRadius(dp(10));
+    d.setColor(t[1]);
+    d.setStroke(dp(1), t[2]);
+    popTv.setBackground(d);
+    popTv.setTextColor(t[3]);
+    popTv.setText(label);
+    int w = (int) (v.getWidth() * 1.4f), hh = dp(keyH + 22);
+    int[] loc = new int[2];
+    v.getLocationInWindow(loc);
+    int x = loc[0] - (w - v.getWidth()) / 2, y = loc[1] - hh + dp(6);
+    if (pop.isShowing()) pop.update(x, y, w, hh);
+    else { pop.setWidth(w); pop.setHeight(hh); pop.showAtLocation(v, Gravity.NO_GRAVITY, x, y); }
+  }
+
+  void hidePop() { if (pop != null && pop.isShowing()) pop.dismiss(); }
 
   int dp(int v) { return (int) (v * getResources().getDisplayMetrics().density); }
 
@@ -56,13 +84,17 @@ public class KeyboardService extends InputMethodService {
     setInputView(build()); updateShift();
   }
 
-  void redraw() { setInputView(build()); }
+  void redraw() { hidePop(); setInputView(build()); }
 
   View build() {
     LinearLayout root = new LinearLayout(this);
     root.setOrientation(LinearLayout.VERTICAL);
     root.setBackgroundColor(t[0]);
     root.setPadding(dp(3), 0, dp(3), dp(6));
+    root.setOnApplyWindowInsetsListener((v, in) -> {
+      v.setPadding(dp(3), 0, dp(3), dp(6) + in.getSystemWindowInsetBottom());
+      return in;
+    });
     LinearLayout bar = new LinearLayout(this);
     bar.setGravity(Gravity.CENTER_VERTICAL);
     bar.addView(tool("⚙", v -> startActivity(new Intent(this, SettingsActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))));
@@ -134,10 +166,21 @@ public class KeyboardService extends InputMethodService {
           }
           return true;
         });
-      } else b.setOnClickListener(v -> press(v, k));
+      } else {
+        b.setOnClickListener(v -> press(v, k));
+        if (!sp && !k.equals("SPACE")) {
+          final String pl = label;
+          b.setOnTouchListener((v, ev) -> {
+            int a = ev.getActionMasked();
+            if (a == MotionEvent.ACTION_DOWN) showPop(v, pl);
+            else if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) hidePop();
+            return false;
+          });
+        }
+      }
       if (digitsOnLong && i < 10) {
         final String dg = String.valueOf((i + 1) % 10);
-        b.setOnLongClickListener(v -> { commit(dg); return true; });
+        b.setOnLongClickListener(v -> { hidePop(); commit(dg); return true; });
       }
       r.addView(b, lp);
     }
