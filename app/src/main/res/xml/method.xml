@@ -1,0 +1,3 @@
+<input-method xmlns:android="http://schemas.android.com/apk/res/android" android:settingsActivity="com.sype.klavye.SettingsActivity">
+  <subtype android:label="Türkçe" android:imeSubtypeLocale="tr_TR" android:imeSubtypeMode="keyboard"/>
+</input-method>
