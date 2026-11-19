@@ -251,14 +251,21 @@ public class KeyboardService extends InputMethodService {
     CharSequence sel = ic.getSelectedText(0);
     final boolean hasSel = sel != null && sel.length() > 0;
     ExtractedText et = ic.getExtractedText(new ExtractedTextRequest(), 0);
-    final String src = hasSel ? sel.toString() : (et != null && et.text != null ? et.text.toString() : "");
-    final int start = et != null ? et.startOffset : 0;
+    String all;
+    int st = 0;
+    if (et != null && et.text != null) { all = et.text.toString(); st = et.startOffset; }
+    else {
+      CharSequence b = ic.getTextBeforeCursor(5000, 0), a = ic.getTextAfterCursor(5000, 0);
+      all = (b == null ? "" : b.toString()) + (a == null ? "" : a.toString());
+    }
+    final String src = hasSel ? sel.toString() : all;
+    final int start = st;
     if (src.trim().isEmpty()) { status.setText("Çevrilecek metin yok"); return; }
     status.setText("Çevriliyor…");
     final String tl = lang;
     new Thread(() -> {
       String r;
-      try { r = tr(src, tl); } catch (Exception e) { r = null; }
+      try { r = tr(src, tl); } catch (Exception e) { r = null; android.util.Log.e("Klavye", "ceviri", e); }
       final String res = r;
       h.post(() -> {
         InputConnection c = getCurrentInputConnection();
@@ -271,15 +278,13 @@ public class KeyboardService extends InputMethodService {
   }
 
   static String tr(String q, String tl) throws Exception {
-    URL u = new URL("https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=" + tl + "&dt=t&q=" + URLEncoder.encode(q, "UTF-8"));
+    URL u = new URL("https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl=auto&tl=" + tl + "&q=" + URLEncoder.encode(q, "UTF-8"));
     HttpURLConnection c = (HttpURLConnection) u.openConnection();
     c.setConnectTimeout(8000); c.setReadTimeout(8000);
     BufferedReader br = new BufferedReader(new InputStreamReader(c.getInputStream(), "UTF-8"));
     StringBuilder sb = new StringBuilder(); String l;
     while ((l = br.readLine()) != null) sb.append(l);
-    JSONArray a = new JSONArray(sb.toString()).getJSONArray(0);
-    StringBuilder o = new StringBuilder();
-    for (int i = 0; i < a.length(); i++) o.append(a.getJSONArray(i).getString(0));
-    return o.toString();
+    Object o = new JSONArray(sb.toString()).get(0);
+    return o instanceof JSONArray ? ((JSONArray) o).getString(0) : o.toString();
   }
 }
