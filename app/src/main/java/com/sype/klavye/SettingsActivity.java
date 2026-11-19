@@ -39,6 +39,7 @@ public class SettingsActivity extends Activity {
     sw("Tuşa basınca ses", "sound", false);
     sw("Sayı satırı", "num", false);
     sw("Otomatik büyük harf", "autocap", true);
+    sw("Kelime önerileri", "suggest", true);
     label("Tuş yüksekliği");
     SeekBar sb = new SeekBar(this);
     sb.setMax(28);

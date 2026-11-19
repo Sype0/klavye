@@ -5,13 +5,14 @@ import android.graphics.drawable.GradientDrawable;
 import android.inputmethodservice.InputMethodService;
 import android.media.AudioManager;
 import android.os.*;
+import android.text.TextUtils;
 import android.view.*;
 import android.view.inputmethod.*;
 import android.widget.*;
 import org.json.JSONArray;
 import java.io.*;
 import java.net.*;
-import java.util.Locale;
+import java.util.*;
 
 public class KeyboardService extends InputMethodService {
   static final String[] THEME_NAMES = {"Açık", "Koyu", "AMOLED Siyah", "Mavi", "Pembe", "Yeşil"};
@@ -29,17 +30,191 @@ public class KeyboardService extends InputMethodService {
     {"~ ` | • √ π ÷ × { }", "€ $ £ ^ ° = [ ] % \\", "1/2 < > © ® ✓ … ⌫"}};
   static final String EMOJI = "😀 😂 🤣 😊 😍 😘 😎 🤔 😢 😭 😡 😱 👍 👎 👏 🙏 💪 👌 ✌️ 🤝 ❤️ 💔 🔥 ✨ 🎉 💯 ✅ ❌ 🌹 ☀️ 🌙 ⭐ 🍕 ☕ 🎂 ⚽ 🚗 ✈️ 🏠 📱 💰 🎁 😴 🤗 🙄 😅 😇 🥳";
   static final Locale TR = new Locale("tr", "TR");
+  static final String UA = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Mobile Safari/537.36";
 
   SharedPreferences p;
   int[] t;
-  boolean shift, caps, sym, emoji, vib, sound, numRow, autoCap;
-  int page, keyH;
+  boolean shift, caps, sym, emoji, vib, sound, numRow, autoCap, suggest;
+  int page, keyH, navInset;
   String lang;
-  TextView status;
+  LinearLayout root, bar;
   final Handler h = new Handler(Looper.getMainLooper());
   Runnable repeat;
   PopupWindow pop;
   TextView popTv;
+  final ArrayList<String> dict = new ArrayList<>();
+  final HashMap<String, Integer> learned = new HashMap<>();
+
+  int dp(int v) { return (int) (v * getResources().getDisplayMetrics().density); }
+
+  void msg(String s) { Toast.makeText(this, s, Toast.LENGTH_SHORT).show(); }
+
+  @Override public void onCreate() {
+    super.onCreate();
+    new Thread(() -> {
+      try (BufferedReader br = new BufferedReader(new InputStreamReader(getAssets().open("words.txt"), "UTF-8"))) {
+        ArrayList<String> l = new ArrayList<>();
+        String s;
+        while ((s = br.readLine()) != null) l.add(s.trim());
+        synchronized (dict) { dict.addAll(l); }
+      } catch (Exception ignored) {}
+      try (BufferedReader br = new BufferedReader(new InputStreamReader(openFileInput("user.txt"), "UTF-8"))) {
+        String s;
+        while ((s = br.readLine()) != null) {
+          String[] a = s.split("\t");
+          if (a.length == 2) synchronized (learned) { learned.put(a[0], Integer.parseInt(a[1])); }
+        }
+      } catch (Exception ignored) {}
+    }).start();
+  }
+
+  void load() {
+    p = getSharedPreferences("k", 0);
+    t = THEMES[Math.min(p.getInt("theme", 0), THEMES.length - 1)];
+    vib = p.getBoolean("vib", true); sound = p.getBoolean("sound", false);
+    numRow = p.getBoolean("num", false); autoCap = p.getBoolean("autocap", true);
+    suggest = p.getBoolean("suggest", true);
+    keyH = p.getInt("height", 48); lang = p.getString("lang", "en");
+  }
+
+  @Override public View onCreateInputView() {
+    load();
+    root = new LinearLayout(this);
+    root.setOrientation(LinearLayout.VERTICAL);
+    root.setOnApplyWindowInsetsListener((v, in) -> {
+      navInset = in.getSystemWindowInsetBottom();
+      pad();
+      return in;
+    });
+    build();
+    return root;
+  }
+
+  void pad() { root.setPadding(dp(3), 0, dp(3), dp(6) + navInset); }
+
+  @Override public void onStartInputView(EditorInfo ei, boolean restarting) {
+    load(); sym = emoji = shift = caps = false; page = 0;
+    build(); updateShift();
+  }
+
+  @Override public void onFinishInput() { super.onFinishInput(); saveLearned(); }
+
+  @Override public void onUpdateSelection(int os, int oe, int ns, int ne, int cs, int ce) {
+    super.onUpdateSelection(os, oe, ns, ne, cs, ce);
+    updateBar();
+  }
+
+  void redraw() { build(); }
+
+  void build() {
+    if (root == null) return;
+    hidePop();
+    root.removeAllViews();
+    root.setBackgroundColor(t[0]);
+    pad();
+    bar = new LinearLayout(this);
+    bar.setGravity(Gravity.CENTER_VERTICAL);
+    root.addView(bar, new LinearLayout.LayoutParams(-1, dp(42)));
+    updateBar();
+    if (emoji) {
+      String[] e = EMOJI.split(" ");
+      for (int i = 0; i < e.length; i += 8) {
+        StringBuilder sb = new StringBuilder();
+        for (int j = i; j < Math.min(i + 8, e.length); j++) sb.append(j > i ? " " : "").append(e[j]);
+        addRow(sb.toString(), false);
+      }
+      addRow("ABC SPACE ⌫", false);
+      return;
+    }
+    String[] rows = sym ? SYMS[page] : LETTERS;
+    if (numRow && !sym) addRow("1 2 3 4 5 6 7 8 9 0", false);
+    for (int i = 0; i < 3; i++) addRow(rows[i], i == 0 && !sym);
+    addRow((sym ? "ABC" : "?123") + " , 🌐 SPACE . ⏎", false);
+    root.requestApplyInsets();
+  }
+
+  void updateBar() {
+    if (bar == null) return;
+    bar.removeAllViews();
+    final String w = curWord();
+    List<String> sg = suggest && !emoji && !w.isEmpty() ? suggestions(w) : Collections.emptyList();
+    if (sg.isEmpty()) {
+      bar.addView(tool("⚙", v -> startActivity(new Intent(this, SettingsActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))));
+      bar.addView(tool(emoji ? "⌨" : "😊", v -> { emoji = !emoji; sym = false; redraw(); }));
+      bar.addView(tool("📋", v -> paste()));
+      bar.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1));
+      bar.addView(tool("文A → " + lang.toUpperCase(), v -> translate()));
+    } else {
+      for (String s : sg) {
+        TextView b = tool(s, v -> pick(w, s));
+        b.setSingleLine(true);
+        b.setEllipsize(TextUtils.TruncateAt.END);
+        bar.addView(b, new LinearLayout.LayoutParams(0, -1, 1));
+      }
+      bar.addView(tool("文A", v -> translate()));
+    }
+  }
+
+  String curWord() {
+    InputConnection ic = getCurrentInputConnection();
+    if (ic == null) return "";
+    CharSequence c = ic.getTextBeforeCursor(40, 0);
+    if (c == null) return "";
+    int i = c.length();
+    while (i > 0 && Character.isLetter(c.charAt(i - 1))) i--;
+    return c.subSequence(i, c.length()).toString();
+  }
+
+  List<String> suggestions(String w) {
+    String lw = w.toLowerCase(TR);
+    LinkedHashSet<String> out = new LinkedHashSet<>();
+    ArrayList<Map.Entry<String, Integer>> ls = new ArrayList<>();
+    synchronized (learned) {
+      for (Map.Entry<String, Integer> e : learned.entrySet())
+        if (e.getKey().startsWith(lw) && !e.getKey().equals(lw)) ls.add(e);
+    }
+    ls.sort((a, b) -> b.getValue() - a.getValue());
+    for (Map.Entry<String, Integer> e : ls) { if (out.size() >= 3) break; out.add(e.getKey()); }
+    synchronized (dict) {
+      for (String d : dict) { if (out.size() >= 3) break; if (d.startsWith(lw) && !d.equals(lw)) out.add(d); }
+    }
+    boolean up = Character.isUpperCase(w.charAt(0));
+    ArrayList<String> r = new ArrayList<>();
+    for (String s : out) r.add(up ? s.substring(0, 1).toUpperCase(TR) + s.substring(1) : s);
+    return r;
+  }
+
+  void pick(String w, String s) {
+    InputConnection ic = getCurrentInputConnection();
+    if (ic == null) return;
+    ic.deleteSurroundingText(w.length(), 0);
+    ic.commitText(s + " ", 1);
+    learn(s);
+    if (shift && !caps) { shift = false; redraw(); }
+    updateShift();
+  }
+
+  void learn(String w) {
+    if (w.length() < 2) return;
+    synchronized (learned) { learned.merge(w.toLowerCase(TR), 1, Integer::sum); }
+  }
+
+  void saveLearned() {
+    try (Writer wr = new OutputStreamWriter(openFileOutput("user.txt", 0), "UTF-8")) {
+      synchronized (learned) {
+        for (Map.Entry<String, Integer> e : learned.entrySet()) wr.write(e.getKey() + "\t" + e.getValue() + "\n");
+      }
+    } catch (Exception ignored) {}
+  }
+
+  TextView tool(String s, View.OnClickListener l) {
+    TextView b = new TextView(this);
+    b.setText(s); b.setTextSize(17); b.setTextColor(t[3]);
+    b.setPadding(dp(12), 0, dp(12), 0); b.setGravity(Gravity.CENTER);
+    b.setLayoutParams(new LinearLayout.LayoutParams(-2, -1));
+    b.setOnClickListener(l);
+    return b;
+  }
 
   void showPop(View v, String label) {
     if (pop == null) {
@@ -67,74 +242,9 @@ public class KeyboardService extends InputMethodService {
 
   void hidePop() { if (pop != null && pop.isShowing()) pop.dismiss(); }
 
-  int dp(int v) { return (int) (v * getResources().getDisplayMetrics().density); }
-
-  void load() {
-    p = getSharedPreferences("k", 0);
-    t = THEMES[Math.min(p.getInt("theme", 0), THEMES.length - 1)];
-    vib = p.getBoolean("vib", true); sound = p.getBoolean("sound", false);
-    numRow = p.getBoolean("num", false); autoCap = p.getBoolean("autocap", true);
-    keyH = p.getInt("height", 48); lang = p.getString("lang", "en");
-  }
-
-  @Override public View onCreateInputView() { load(); return build(); }
-
-  @Override public void onStartInputView(EditorInfo ei, boolean restarting) {
-    load(); sym = emoji = shift = caps = false; page = 0;
-    setInputView(build()); updateShift();
-  }
-
-  void redraw() { hidePop(); setInputView(build()); }
-
-  View build() {
-    LinearLayout root = new LinearLayout(this);
-    root.setOrientation(LinearLayout.VERTICAL);
-    root.setBackgroundColor(t[0]);
-    root.setPadding(dp(3), 0, dp(3), dp(6));
-    root.setOnApplyWindowInsetsListener((v, in) -> {
-      v.setPadding(dp(3), 0, dp(3), dp(6) + in.getSystemWindowInsetBottom());
-      return in;
-    });
-    LinearLayout bar = new LinearLayout(this);
-    bar.setGravity(Gravity.CENTER_VERTICAL);
-    bar.addView(tool("⚙", v -> startActivity(new Intent(this, SettingsActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))));
-    bar.addView(tool(emoji ? "⌨" : "😊", v -> { emoji = !emoji; sym = false; redraw(); }));
-    bar.addView(tool("📋", v -> paste()));
-    bar.addView(tool("文A → " + lang.toUpperCase(), v -> translate()));
-    status = new TextView(this);
-    status.setTextColor(t[4]);
-    status.setGravity(Gravity.END);
-    bar.addView(status, new LinearLayout.LayoutParams(0, -2, 1));
-    root.addView(bar, new LinearLayout.LayoutParams(-1, dp(42)));
-    if (emoji) {
-      String[] e = EMOJI.split(" ");
-      for (int i = 0; i < e.length; i += 8) {
-        StringBuilder sb = new StringBuilder();
-        for (int j = i; j < Math.min(i + 8, e.length); j++) sb.append(j > i ? " " : "").append(e[j]);
-        addRow(root, sb.toString(), false);
-      }
-      addRow(root, "ABC SPACE ⌫", false);
-      return root;
-    }
-    String[] rows = sym ? SYMS[page] : LETTERS;
-    if (numRow && !sym) addRow(root, "1 2 3 4 5 6 7 8 9 0", false);
-    for (int i = 0; i < 3; i++) addRow(root, rows[i], i == 0 && !sym);
-    addRow(root, (sym ? "ABC" : "?123") + " , 🌐 SPACE . ⏎", false);
-    return root;
-  }
-
-  TextView tool(String s, View.OnClickListener l) {
-    TextView b = new TextView(this);
-    b.setText(s); b.setTextSize(17); b.setTextColor(t[3]);
-    b.setPadding(dp(12), 0, dp(12), 0); b.setGravity(Gravity.CENTER);
-    b.setLayoutParams(new LinearLayout.LayoutParams(-2, -1));
-    b.setOnClickListener(l);
-    return b;
-  }
-
   boolean special(String k) { return k.length() > 1 && !k.equals("SPACE") || "⇧⌫⏎".contains(k); }
 
-  void addRow(LinearLayout root, String row, boolean digitsOnLong) {
+  void addRow(String row, boolean digitsOnLong) {
     LinearLayout r = new LinearLayout(this);
     String[] ks = row.split(" ");
     for (int i = 0; i < ks.length; i++) {
@@ -147,10 +257,11 @@ public class KeyboardService extends InputMethodService {
       b.setText(label);
       b.setGravity(Gravity.CENTER);
       b.setTextSize(k.equals("SPACE") ? 14 : (isEmoji ? 24 : 21));
-      b.setTextColor(k.equals("⏎") || (k.equals("⇧") && shift) ? 0xFFFFFFFF : t[3]);
+      boolean hi = k.equals("⏎") || (k.equals("⇧") && shift);
+      b.setTextColor(hi ? 0xFFFFFFFF : t[3]);
       GradientDrawable d = new GradientDrawable();
       d.setCornerRadius(dp(7));
-      d.setColor(k.equals("⏎") || (k.equals("⇧") && shift) ? t[4] : (sp ? t[2] : t[1]));
+      d.setColor(hi ? t[4] : (sp ? t[2] : t[1]));
       b.setBackground(d);
       float w = k.equals("SPACE") ? 4f : (sp && !k.equals("1/2") ? 1.5f : 1f);
       LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(keyH), w);
@@ -222,8 +333,9 @@ public class KeyboardService extends InputMethodService {
         if (!switchToNextInputMethod(false))
           ((InputMethodManager) getSystemService(INPUT_METHOD_SERVICE)).showInputMethodPicker();
         return;
-      case "SPACE": ic.commitText(" ", 1); updateShift(); return;
+      case "SPACE": learn(curWord()); ic.commitText(" ", 1); updateShift(); return;
       case "⏎": {
+        learn(curWord());
         EditorInfo ei = getCurrentInputEditorInfo();
         int a = ei == null ? 0 : ei.imeOptions & EditorInfo.IME_MASK_ACTION;
         if (ei != null && a > EditorInfo.IME_ACTION_NONE && (ei.imeOptions & EditorInfo.IME_FLAG_NO_ENTER_ACTION) == 0)
@@ -232,6 +344,7 @@ public class KeyboardService extends InputMethodService {
         updateShift(); return;
       }
       default:
+        if (!Character.isLetter(k.charAt(0))) learn(curWord());
         ic.commitText(shift && !sym && !emoji ? k.toUpperCase(TR) : k, 1);
         if (shift && !caps) { shift = false; redraw(); }
         if (".!?".contains(k)) updateShift();
@@ -242,7 +355,7 @@ public class KeyboardService extends InputMethodService {
     ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
     ClipData cd = cm.getPrimaryClip();
     if (cd != null && cd.getItemCount() > 0) commit(cd.getItemAt(0).coerceToText(this).toString());
-    else status.setText("Pano boş");
+    else msg("Pano boş");
   }
 
   void translate() {
@@ -260,19 +373,18 @@ public class KeyboardService extends InputMethodService {
     }
     final String src = hasSel ? sel.toString() : all;
     final int start = st;
-    if (src.trim().isEmpty()) { status.setText("Çevrilecek metin yok"); return; }
-    status.setText("Çevriliyor…");
+    if (src.trim().isEmpty()) { msg("Çevrilecek metin yok"); return; }
+    msg("Çevriliyor…");
     final String tl = lang;
     new Thread(() -> {
-      String r;
-      try { r = tr(src, tl); } catch (Exception e) { r = null; android.util.Log.e("Klavye", "ceviri", e); }
-      final String res = r;
+      String r, err = null;
+      try { r = tr(src, tl); } catch (Exception e) { r = null; err = e.getClass().getSimpleName() + ": " + e.getMessage(); }
+      final String res = r, er = err;
       h.post(() -> {
         InputConnection c = getCurrentInputConnection();
-        if (res == null || c == null) { status.setText("Çeviri hatası"); return; }
+        if (res == null || c == null) { msg("Çeviri hatası: " + er); return; }
         if (!hasSel) c.setSelection(start, start + src.length());
         c.commitText(res, 1);
-        status.setText("");
       });
     }).start();
   }
@@ -280,7 +392,9 @@ public class KeyboardService extends InputMethodService {
   static String tr(String q, String tl) throws Exception {
     URL u = new URL("https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl=auto&tl=" + tl + "&q=" + URLEncoder.encode(q, "UTF-8"));
     HttpURLConnection c = (HttpURLConnection) u.openConnection();
+    c.setRequestProperty("User-Agent", UA);
     c.setConnectTimeout(8000); c.setReadTimeout(8000);
+    if (c.getResponseCode() != 200) throw new IOException("HTTP " + c.getResponseCode());
     BufferedReader br = new BufferedReader(new InputStreamReader(c.getInputStream(), "UTF-8"));
     StringBuilder sb = new StringBuilder(); String l;
     while ((l = br.readLine()) != null) sb.append(l);
